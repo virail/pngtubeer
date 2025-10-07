@@ -78,6 +78,25 @@ int main() {
         goto cleanup;
     }
 
+    WAVEFORMATEXTENSIBLE *extFormat = (WAVEFORMATEXTENSIBLE*)pCaptureFormat;
+
+    printf("Valid bits per sample: %d\n", extFormat->Samples.wValidBitsPerSample);
+    printf("Channel Mask: %08X\n", extFormat->dwChannelMask);
+    printf("SubFormat: %08X-%04X-%04X-",
+        extFormat->SubFormat.Data1,
+        extFormat->SubFormat.Data2,
+        extFormat->SubFormat.Data3
+    );
+    printf("%02X%02X-", extFormat->SubFormat.Data4[0], extFormat->SubFormat.Data4[1]);
+    printf("%02X%02X%02X%02X%02X%02X\n",
+        extFormat->SubFormat.Data4[2],
+        extFormat->SubFormat.Data4[3],
+        extFormat->SubFormat.Data4[4],
+        extFormat->SubFormat.Data4[5],
+        extFormat->SubFormat.Data4[6],
+        extFormat->SubFormat.Data4[7]
+    );
+
     printf("Capture Format: \n");
     printf("    Sample Rate: %lu Hz\n", pCaptureFormat->nSamplesPerSec);
     printf("    Channels: %u\n", pCaptureFormat->nChannels);
@@ -299,7 +318,7 @@ int main() {
 
                     if (availableData >= bytesToRead) {
                         for (UINT32 i = 0; i < bytesToRead; i++) {
-                            pRenderData[i] = intermediateBuffer[readPos];
+                            pRenderData[i] = intermediateBuffer[readPos] + 0.2;
                             readPos = (readPos + 1) % intermediateBufferSize;
                         }
                         availableData -= bytesToRead;
