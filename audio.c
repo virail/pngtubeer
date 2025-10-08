@@ -267,6 +267,23 @@ int main() {
                 UINT32 bytesToWrite = numFramesAvailable *
                                         pCaptureFormat->nBlockAlign;
 
+                for (int i = 0; i < numFramesAvailable; i++) {
+                    float leftSample = *(float*)(pCaptureData + i * 8);
+                    float rightSample = *(float*)(pCaptureData + i * 8 + 4);
+                    const float threshold = 0.00001f;
+
+                    // printf("\t[LEFT - %f] [RIGHT - %f]\n", leftSample, rightSample);
+                    if (abs(leftSample) < threshold) {
+                        leftSample = 0.0f;
+                    }
+                    if (abs(rightSample) < threshold) {
+                        rightSample = 0.0f;
+                    }
+
+                    *(float*)(pCaptureData + i * 8) = leftSample;
+                    *(float*)(pCaptureData + i * 8 + 4) = rightSample;
+                }
+
                 if (availableData + bytesToWrite <= intermediateBufferSize) {
                     for (UINT32 i = 0; i < bytesToWrite; i++) {
                         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
