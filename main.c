@@ -42,8 +42,9 @@ static float g_leftSample = 0.0f;
 static float g_rightSample = 0.0f;
 static bool g_hasNewAudio = false;
 
-int g_mouthX = 50;
-int g_mouthY = 50;
+static bool g_keyPress = false;
+static bool g_mousePress = false;
+UINT_PTR g_timerId = 0;
 
 void CleanupAudio(void) {
     if (pCaptureClientService) pCaptureClientService->lpVtbl->Release(pCaptureClientService);
@@ -300,6 +301,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         NULL
     );
 
+    g_timerId = SetTimer(g_hwnd, 1, 16, NULL);
+
     if (!g_hwnd) {
         MessageBox(NULL, L"Window creation failed", L"Error", MB_OK | MB_ICONERROR);
         CleanupAudio();
@@ -320,6 +323,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg)
     {
         case WM_DESTROY:
+            if (g_timerId) {
+                KillTimer(hwnd, g_timerId);
+            }
             g_running = false;
             PostQuitMessage(0);
             return 0;
@@ -333,7 +339,45 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             {
                 DestroyWindow(hwnd);
             }
+            g_keyPress = true;
             return 0;
+        
+        case WM_KEYUP:
+            g_keyPress = false;
+            return 0;
+
+        case WM_TIMER:
+            if (wParam == 1) {
+                bool anyKeyPressed = false;
+                bool anyMousePressed = false;
+
+                if (
+                        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ||
+                        (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ||
+                        (GetAsyncKeyState(VK_MBUTTON) & 0x8000)
+                        ) {
+                    anyMousePressed = true;
+                }
+
+                for (int vk = 8; vk < 256; vk++) {
+                    if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON) continue;
+
+                    if (GetAsyncKeyState(vk) & 0x8000) {
+                        anyKeyPressed = true;
+                        break;
+                    }
+                }
+
+                if (anyKeyPressed != g_keyPress) {
+                    g_keyPress = anyKeyPressed;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+                if (anyMousePressed != g_mousePress) {
+                    g_mousePress = anyMousePressed;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
+        break;
 
         default:
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -347,32 +391,62 @@ void RenderFrame(void) {
     HDC hdc = GetDC(g_hwnd);
     if (!hdc) return;
 
+    SetGraphicsMode(hdc, GM_ADVANCED);
+    // SetMapMode(hdc, MM_LOENGLISH);
+
+    DPtoLP(hdc, (LPPOINT) &clientRect, 2);
+    const float middleX = clientRect.right / 2;
+    const float middleY = clientRect.bottom / 2;
+
+    // Draw Green Background
     HBRUSH hBrush = CreateSolidBrush(RGB(0,255,0));
     FillRect(hdc, &clientRect, hBrush);
     DeleteObject(hBrush);
     
 #define mouthWidth 100
-#define mouthHeight 50
-#define mouthX 50
-#define bottomY 150
-#define topY 75
-    RECT bottomMouth = {mouthX, bottomY, mouthX + mouthWidth, bottomY + mouthHeight};
+#define mouthHeight clientRect.bottom / 10
+
+    RECT bottomMouth = {
+        (middleX  - mouthWidth), 
+        (middleY),
+        (middleX  + mouthWidth),
+        (clientRect.bottom)
+    };
     HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
     HBRUSH blueBrush = CreateSolidBrush(RGB(100, 100, 255));
     FillRect(hdc, &bottomMouth, blueBrush);
 
     float mouthLevel = GetAudioLevel();
-    float audioY = mouthLevel * -1000.f;
+    float audioY = mouthLevel > 0.005f ? (mouthLevel - 0.005f) * 1000.f : 0.0f;
 
-    RECT topMouth = {mouthX, topY + audioY, mouthX + mouthWidth, topY + mouthHeight + audioY};
+    RECT topMouth = {
+        middleX - mouthWidth,
+        middleY - audioY - mouthHeight,
+        middleX + mouthWidth,
+        middleY - audioY
+    };
     FillRect(hdc, &topMouth, whiteBrush);
 
+    SelectObject(hdc, whiteBrush);
+#define eyeSize mouthHeight / 4
+    // Left eye
+    Ellipse(hdc,
+        middleX - mouthWidth / 2 - eyeSize,
+        middleY - mouthHeight / 2 - eyeSize - audioY,
+        middleX - mouthWidth / 2 + eyeSize,
+        middleY - mouthHeight / 2 + eyeSize - audioY
+    );
+    // Right eye
+    Ellipse(hdc,
+        middleX + mouthWidth / 2 - eyeSize,
+        middleY - mouthHeight / 2 - eyeSize - audioY,
+        middleX + mouthWidth / 2 + eyeSize,
+        middleY - mouthHeight / 2 + eyeSize - audioY
+    );
 
-    DeleteObject(whiteBrush);
-    DeleteObject(blueBrush);
     float audioLevel = GetAudioLevel();
     if (audioLevel > 0.0f) {
-        int barWidth = (int)(audioLevel *200.0f);
+        int barWidth = (int)(audioLevel *500.0f);
         if (barWidth > 200) barWidth = 200;
 
         HBRUSH barBrush = CreateSolidBrush(RGB(255, 100, 100));
@@ -385,8 +459,66 @@ void RenderFrame(void) {
     snprintf(buffer, sizeof(buffer), "Audio Level: %.4f", audioLevel);
     SetTextColor(hdc, RGB(0, 0, 0));
     SetBkMode(hdc, TRANSPARENT);
-    TextOutA(hdc, 10, 10, buffer, (int)strlen(buffer));
+    TextOutA(hdc, 10, 20, buffer, (int)strlen(buffer));
+    
+    // Drawing Left Arm
+    float rad = g_keyPress ? -45.0f * (3.14159f / 180.0f) : 45.0f * (3.14159f / 180.0f);
+    float c = cos(rad);
+    float s = sin(rad);
 
-    // Release device context
+    float leftX[4] = {-20, -20, 20, 20};
+    float leftY[4] = {0, 10, 10, 0};
+
+    POINT points[4] = {
+        {leftX[0] * c - leftY[0] * s, leftX[0] * s + leftY[0] * c},
+        {leftX[1] * c - leftY[1] * s, leftX[1] * s + leftY[1] * c},
+        {leftX[2] * c - leftY[2] * s, leftX[2] * s + leftY[2] * c},
+        {leftX[3] * c - leftY[3] * s, leftX[3] * s + leftY[3] * c},
+    };
+
+    SaveDC(hdc);
+
+    XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX - mouthWidth, (FLOAT)middleY};
+    ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+    
+    if (g_keyPress) {
+        XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, -10, 20};
+        ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+    }
+
+    SelectObject(hdc, blueBrush);
+    Polygon(hdc, points, 4);
+    RestoreDC(hdc, -1);
+
+    SaveDC(hdc);
+
+    rad = g_mousePress ? 45.0f * (3.14159f / 180.0f) : -45.0f * (3.14159f / 180.0f);
+    c = cos(rad);
+    s = sin(rad);
+
+    float rightX[4] = {-20, -20, 20, 20};
+    float rightY[4] = {0, 10, 10, 0};
+
+    POINT rightPoints[4] = {
+        {rightX[0] * c - rightY[0] * s, rightX[0] * s + rightY[0] * c},
+        {rightX[1] * c - rightY[1] * s, rightX[1] * s + rightY[1] * c},
+        {rightX[2] * c - rightY[2] * s, rightX[2] * s + rightY[2] * c},
+        {rightX[3] * c - rightY[3] * s, rightX[3] * s + rightY[3] * c},
+    };
+
+    XFORM rightTranslate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX + mouthWidth, (FLOAT)middleY};
+    ModifyWorldTransform(hdc, &rightTranslate, MWT_LEFTMULTIPLY);
+
+    if (g_mousePress) {
+        XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, 10, 20};
+        ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+    }
+
+    SelectObject(hdc, blueBrush);
+    Polygon(hdc, rightPoints, 4);
+
+    DeleteObject(whiteBrush);
+    DeleteObject(blueBrush);
+    RestoreDC(hdc, -1);
     ReleaseDC(g_hwnd, hdc);
 }
