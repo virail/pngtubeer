@@ -10,6 +10,9 @@
 #include <stdbool.h>
 #include <math.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #define WINDOW_WIDTH 1920 * 0.25
 #define WINDOW_HEIGHT 1080 * 0.25
 #define centerX WINDOW_WIDTH / 2
@@ -46,6 +49,28 @@ static bool g_keyPress = false;
 static bool g_mousePress = false;
 UINT_PTR g_timerId = 0;
 
+typedef struct {
+    HBITMAP hBitmap;
+    int width;
+    int height;
+} Image;
+
+Image* g_keyboard = NULL;
+
+static HBITMAP hBackBuffer = NULL;
+static int bufferWidth = 0, bufferHeight = 0;
+
+void ensure_back_buffer(HDC hdc, int width, int height) {
+    if (hBackBuffer == NULL || bufferWidth != width || bufferHeight != height) {
+        if (hBackBuffer) DeleteObject(hBackBuffer);
+
+        hBackBuffer = CreateCompatibleBitmap(hdc, width, height);
+
+        bufferWidth = width;
+        bufferHeight = height;
+    }
+}
+
 void CleanupAudio(void) {
     if (pCaptureClientService) pCaptureClientService->lpVtbl->Release(pCaptureClientService);
     if (pCaptureFormat) CoTaskMemFree(pCaptureFormat);
@@ -54,6 +79,11 @@ void CleanupAudio(void) {
     if (pEnumerator) pEnumerator->lpVtbl->Release(pEnumerator);
     CoUninitialize();
 
+}
+
+void Cleanup() {
+    CleanupAudio();
+    if (hBackBuffer) DeleteObject(hBackBuffer);
 }
 
 int pngtubeerInit() {
@@ -246,6 +276,68 @@ float GetAudioLevel() {
     return fmaxf(fabsf(g_leftSample), fabsf(g_rightSample));
 }
 
+Image* load_image(const char* filename) {
+    int width, height, channels;
+    unsigned char* data = stbi_load(filename, &width, &height, &channels, 4);
+    if (!data) return NULL;
+
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdcScreen = GetDC(NULL);
+    void* bits;
+    HBITMAP hBitmap = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, hdcScreen);
+
+    if (!hBitmap) {
+        stbi_image_free(data);
+        return NULL;
+    }
+
+    unsigned char* dest = (unsigned char*)bits;
+    for (int i = 0; i < width * height * 4; i += 4) {
+        dest[i] = data[i + 2];      // B
+        dest[i + 1] = data[i + 1];  // G
+        dest[i + 2] = data[i];      // R
+        dest[i + 3] = data[i + 3];  // A
+    }
+
+    Image* image = (Image*)malloc(sizeof(Image));
+    image->hBitmap = hBitmap;
+    image->width = width;
+    image->height = height;
+
+    stbi_image_free(data);
+    return image;
+
+}
+
+void draw_image(HDC hdc, Image* image, int x, int y) {
+    if (!image) return;
+
+    HDC hMemDC = CreateCompatibleDC(hdc);
+    HBITMAP hOld = (HBITMAP)SelectObject(hMemDC, image->hBitmap);
+
+    BitBlt(hdc, x, y, image->width, image->height, hMemDC, 0, 0, SRCCOPY);
+
+    SelectObject(hMemDC, hOld);
+    DeleteDC(hMemDC);
+}
+
+void free_image(Image* image) {
+    if (image) {
+        if (image->hBitmap) {
+            DeleteObject(image->hBitmap);
+        }
+        free(image);
+    }
+}
+
 void loop(void) {
     MSG msg = {0};
 
@@ -267,7 +359,7 @@ void loop(void) {
 
         RenderFrame();
 
-        Sleep(16);
+        Sleep(1);
 
     }
 }
@@ -314,7 +406,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     loop();
 
-    CleanupAudio();
+    Cleanup();
     return 0;
 
 }
@@ -378,6 +470,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
             }
         break;
+        case WM_ERASEBKGND:
+            return 1;
 
         default:
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -387,20 +481,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 void RenderFrame(void) {
     RECT clientRect;
     GetClientRect(g_hwnd, &clientRect);
+    int width = clientRect.right - clientRect.left;
+    int height = clientRect.bottom - clientRect.top;
 
     HDC hdc = GetDC(g_hwnd);
     if (!hdc) return;
+    HDC hMemDC = CreateCompatibleDC(hdc);
+    ensure_back_buffer(hdc, width, height);
+    HBITMAP hOldBitmap = (HBITMAP)SelectObject(hMemDC, hBackBuffer);
 
-    SetGraphicsMode(hdc, GM_ADVANCED);
+    SetGraphicsMode(hMemDC, GM_ADVANCED);
     // SetMapMode(hdc, MM_LOENGLISH);
 
-    DPtoLP(hdc, (LPPOINT) &clientRect, 2);
+    DPtoLP(hMemDC, (LPPOINT) &clientRect, 2);
     const float middleX = clientRect.right / 2;
     const float middleY = clientRect.bottom / 2;
 
     // Draw Green Background
     HBRUSH hBrush = CreateSolidBrush(RGB(0,255,0));
-    FillRect(hdc, &clientRect, hBrush);
+    FillRect(hMemDC, &clientRect, hBrush);
     DeleteObject(hBrush);
     
 #define mouthWidth 100
@@ -414,7 +513,7 @@ void RenderFrame(void) {
     };
     HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
     HBRUSH blueBrush = CreateSolidBrush(RGB(100, 100, 255));
-    FillRect(hdc, &bottomMouth, blueBrush);
+    FillRect(hMemDC, &bottomMouth, blueBrush);
 
     float mouthLevel = GetAudioLevel();
     float audioY = mouthLevel > 0.005f ? (mouthLevel - 0.005f) * 1000.f : 0.0f;
@@ -425,19 +524,19 @@ void RenderFrame(void) {
         middleX + mouthWidth,
         middleY - audioY
     };
-    FillRect(hdc, &topMouth, whiteBrush);
+    FillRect(hMemDC, &topMouth, whiteBrush);
 
-    SelectObject(hdc, whiteBrush);
+    SelectObject(hMemDC, whiteBrush);
 #define eyeSize mouthHeight / 4
     // Left eye
-    Ellipse(hdc,
+    Ellipse(hMemDC,
         middleX - mouthWidth / 2 - eyeSize,
         middleY - mouthHeight / 2 - eyeSize - audioY,
         middleX - mouthWidth / 2 + eyeSize,
         middleY - mouthHeight / 2 + eyeSize - audioY
     );
     // Right eye
-    Ellipse(hdc,
+    Ellipse(hMemDC,
         middleX + mouthWidth / 2 - eyeSize,
         middleY - mouthHeight / 2 - eyeSize - audioY,
         middleX + mouthWidth / 2 + eyeSize,
@@ -451,15 +550,15 @@ void RenderFrame(void) {
 
         HBRUSH barBrush = CreateSolidBrush(RGB(255, 100, 100));
         RECT barRect = {50, 100, 50 + barWidth, 130};
-        FillRect(hdc, &barRect, barBrush);
+        FillRect(hMemDC, &barRect, barBrush);
         DeleteObject(barBrush);
     }
     // Draw text
     char buffer[256];
     snprintf(buffer, sizeof(buffer), "Audio Level: %.4f", audioLevel);
-    SetTextColor(hdc, RGB(0, 0, 0));
-    SetBkMode(hdc, TRANSPARENT);
-    TextOutA(hdc, 10, 20, buffer, (int)strlen(buffer));
+    SetTextColor(hMemDC, RGB(0, 0, 0));
+    SetBkMode(hMemDC, TRANSPARENT);
+    TextOutA(hMemDC, 10, 20, buffer, (int)strlen(buffer));
     
     // Drawing Left Arm
     float rad = g_keyPress ? -45.0f * (3.14159f / 180.0f) : 45.0f * (3.14159f / 180.0f);
@@ -476,21 +575,21 @@ void RenderFrame(void) {
         {leftX[3] * c - leftY[3] * s, leftX[3] * s + leftY[3] * c},
     };
 
-    SaveDC(hdc);
+    SaveDC(hMemDC);
 
     XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX - mouthWidth, (FLOAT)middleY};
-    ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+    ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
     
     if (g_keyPress) {
         XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, -10, 20};
-        ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+        ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
     }
 
-    SelectObject(hdc, blueBrush);
-    Polygon(hdc, points, 4);
-    RestoreDC(hdc, -1);
+    SelectObject(hMemDC, blueBrush);
+    Polygon(hMemDC, points, 4);
+    RestoreDC(hMemDC, -1);
 
-    SaveDC(hdc);
+    SaveDC(hMemDC);
 
     rad = g_mousePress ? 45.0f * (3.14159f / 180.0f) : -45.0f * (3.14159f / 180.0f);
     c = cos(rad);
@@ -507,18 +606,32 @@ void RenderFrame(void) {
     };
 
     XFORM rightTranslate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX + mouthWidth, (FLOAT)middleY};
-    ModifyWorldTransform(hdc, &rightTranslate, MWT_LEFTMULTIPLY);
+    ModifyWorldTransform(hMemDC, &rightTranslate, MWT_LEFTMULTIPLY);
 
     if (g_mousePress) {
         XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, 10, 20};
-        ModifyWorldTransform(hdc, &translate, MWT_LEFTMULTIPLY);
+        ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
     }
 
-    SelectObject(hdc, blueBrush);
-    Polygon(hdc, rightPoints, 4);
+    SelectObject(hMemDC, blueBrush);
+    Polygon(hMemDC, rightPoints, 4);
+
+    RestoreDC(hMemDC, -1);
+
+    if (!g_keyboard) {
+        g_keyboard = load_image("keyboard.png");
+    }
+
+    if (g_keyboard) {
+        draw_image(hMemDC, g_keyboard, 0, 0);
+    }
 
     DeleteObject(whiteBrush);
     DeleteObject(blueBrush);
-    RestoreDC(hdc, -1);
+
+    BitBlt(hdc, 0, 0, width, height, hMemDC, 0, 0, SRCCOPY);
+
+    SelectObject(hMemDC, hOldBitmap);
+    DeleteDC(hMemDC);
     ReleaseDC(g_hwnd, hdc);
 }
