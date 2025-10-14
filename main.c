@@ -60,6 +60,21 @@ Image* g_keyboard = NULL;
 static HBITMAP hBackBuffer = NULL;
 static int bufferWidth = 0, bufferHeight = 0;
 
+// Global Immediate GUI elements
+enum {
+    ID_EDIT_KEYBOARD_X = 1001,
+    ID_EDIT_KEYBOARD_Y = 1002,
+    ID_BTN_APPLY = 1003
+};
+
+int g_keyboardX = 0;
+int g_keyboardY = 0;
+
+int g_mouthWidth = 100;
+int g_mouthHeight = 100;
+
+HWND g_hEditKeyboardX, g_hEditKeyboardY, g_hButton;
+
 void ensure_back_buffer(HDC hdc, int width, int height) {
     if (hBackBuffer == NULL || bufferWidth != width || bufferHeight != height) {
         if (hBackBuffer) DeleteObject(hBackBuffer);
@@ -300,11 +315,18 @@ Image* load_image(const char* filename) {
     }
 
     unsigned char* dest = (unsigned char*)bits;
+    // for (int i = 0; i < width * height * 4; i += 4) {
+    //     dest[i] = data[i + 2];      // B
+    //     dest[i + 1] = data[i + 1];  // G
+    //     dest[i + 2] = data[i];      // R
+    //     dest[i + 3] = data[i + 3];  // A
+    // }
     for (int i = 0; i < width * height * 4; i += 4) {
-        dest[i] = data[i + 2];      // B
-        dest[i + 1] = data[i + 1];  // G
-        dest[i + 2] = data[i];      // R
-        dest[i + 3] = data[i + 3];  // A
+        float alpha = data[i + 3] / 255.0f;
+        dest[i] = (unsigned char)(data[i + 2] * alpha);     // B
+        dest[i + 1] = (unsigned char)(data[i + 1] * alpha); // G
+        dest[i + 2] = (unsigned char)(data[i] * alpha);     // R
+        dest[i + 3] = alpha;                                // A
     }
 
     Image* image = (Image*)malloc(sizeof(Image));
@@ -317,15 +339,57 @@ Image* load_image(const char* filename) {
 
 }
 
-void draw_image(HDC hdc, Image* image, int x, int y) {
+void draw_image(HDC hdc, Image* image, int x, int y, float scale, float angle) {
     if (!image) return;
 
+    // we are wanting to make the image a percentage of the width
+    // means we need the width and then multiply that by the scale we want
+    // scaledW = bufferWidth * scale;
+    // image->width * ratio = scaledW
+    // ratio = scaledW / image->width;
+    // scaledH = height * radtio;
+    
+    // will use bufferWidth and height
+
+    int scaledW = (int)bufferWidth * scale;
+    float ratio = (float)scaledW / image->width;
+    int scaledH = (int)(image->height * ratio);
+    float angleRad = angle * 3.14159 / 180.0f;
+
     HDC hMemDC = CreateCompatibleDC(hdc);
+    HDC hScaledDC = CreateCompatibleDC(hdc);
+    HBITMAP hScaled = CreateCompatibleBitmap(hdc, scaledW, scaledH);
+
+    HBITMAP hOldScaled = (HBITMAP)SelectObject(hScaledDC, hScaled);
     HBITMAP hOld = (HBITMAP)SelectObject(hMemDC, image->hBitmap);
 
-    BitBlt(hdc, x, y, image->width, image->height, hMemDC, 0, 0, SRCCOPY);
+    SetStretchBltMode(hScaledDC, HALFTONE);
+    SetBrushOrgEx(hScaledDC, 0, 0, NULL);
+    StretchBlt(hScaledDC, 0, 0, scaledW, scaledH,
+            hMemDC, 0, 0, image->width, image->height, SRCCOPY);
 
+    float cosA = cosf(angleRad);
+    float sinA = sinf(angleRad);
+
+    float halfW = scaledW * 0.5f;
+    float halfH = scaledH * 0.5f;
+
+    POINT pts[3];
+    pts[0].x = x + (int)(-halfW * cosA + halfH * sinA);
+    pts[0].y = y + (int)(-halfW * sinA - halfH * cosA);
+    pts[1].x = x + (int)(halfW * cosA + halfH * sinA);
+    pts[1].y = y + (int)(halfW * sinA - halfH * cosA);
+    pts[2].x = x + (int)(-halfW * cosA - halfH * sinA);
+    pts[2].y = y + (int)(-halfW * sinA + halfH * cosA);
+
+    PlgBlt(hdc, pts, hScaledDC, 0, 0, scaledW, scaledH, NULL, 0, 0);
+
+    // BitBlt(hdc, 0, 0, image->width, image->height, hMemDC, 0, 0, SRCCOPY);
+
+    SelectObject(hScaledDC, hOldScaled);
     SelectObject(hMemDC, hOld);
+    DeleteObject(hScaled);
+    DeleteDC(hScaledDC);
     DeleteDC(hMemDC);
 }
 
@@ -351,15 +415,13 @@ void loop(void) {
             DispatchMessage(&msg);
         }
 
-        if (!g_running) break;
-
         UpdateAudioFrame();
 
-        // do processing on audio
 
         RenderFrame();
 
         Sleep(1);
+        if (!g_running) break;
 
     }
 }
@@ -384,7 +446,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         0,
         L"PNGtubeerClass",
         L"PNG tubing app",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT,
         WINDOW_WIDTH, WINDOW_HEIGHT,
         NULL,
@@ -420,25 +482,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             g_running = false;
             PostQuitMessage(0);
-            return 0;
+            break;
 
         case WM_CLOSE:
             DestroyWindow(hwnd);
-            return 0;
-
+            break;
         case WM_KEYDOWN:
+        {
             if (wParam == VK_ESCAPE)
             {
                 DestroyWindow(hwnd);
             }
-            g_keyPress = true;
-            return 0;
+            // g_keyPress = true;
+            break;
+        }
         
-        case WM_KEYUP:
-            g_keyPress = false;
-            return 0;
+        // case WM_KEYUP:
+        // {
+        //     g_keyPress = false;
+        //     break;
+        // }
 
         case WM_TIMER:
+        {
             if (wParam == 1) {
                 bool anyKeyPressed = false;
                 bool anyMousePressed = false;
@@ -469,12 +535,98 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
             }
-        break;
+            InvalidateRect(hwnd, NULL, FALSE);
+            break;
+        }
         case WM_ERASEBKGND:
             return 1;
+            break;
+
+        // case WM_CREATE:
+        // {
+        //     RECT clientRect;
+        //     GetClientRect(hwnd, &clientRect);
+        //     int width = clientRect.right - clientRect.left;
+        //     int height = clientRect.bottom - clientRect.top;
+        //
+        //     g_hEditKeyboardX = CreateWindow(
+        //         L"EDIT",
+        //         L"0",
+        //         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
+        //         (int)(width * 0.75f), (int)(height * 0.1f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         hwnd,
+        //         (HMENU)ID_EDIT_KEYBOARD_X,
+        //         ((LPCREATESTRUCT)lParam)->hInstance,
+        //         NULL
+        //     );
+        //     g_hEditKeyboardY = CreateWindow(
+        //         L"EDIT",
+        //         L"0",
+        //         WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
+        //         (int)(width * 0.75f), (int)(height * 0.3f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         hwnd,
+        //         (HMENU)ID_EDIT_KEYBOARD_Y,
+        //         ((LPCREATESTRUCT)lParam)->hInstance,
+        //         NULL
+        //     );
+        //     g_hButton = CreateWindow(
+        //         L"BUTTON",
+        //         L"Adjust Values",
+        //         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        //         (int)(width * 0.75f), (int)(height * 0.5f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         hwnd,
+        //         (HMENU)ID_BTN_APPLY,
+        //         ((LPCREATESTRUCT)lParam)->hInstance,
+        //         NULL
+        //     );
+        //     break;
+        // }
+
+        // case WM_SIZE:
+        // {
+        //     RECT clientRect;
+        //     GetClientRect(hwnd, &clientRect);
+        //     int width = clientRect.right - clientRect.left;
+        //     int height = clientRect.bottom - clientRect.top;
+        //
+        //     printf("clientRect: %d,%d\n", width, height);
+        //
+        //     SetWindowPos(g_hEditKeyboardX, NULL,
+        //         (int)(width * 0.75f), (int)(height * 0.1f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         SWP_NOZORDER | SWP_NOACTIVATE
+        //     );
+        //     SetWindowPos(g_hEditKeyboardY, NULL,
+        //         (int)(width * 0.75f), (int)(height * 0.3f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         SWP_NOZORDER | SWP_NOACTIVATE
+        //     );
+        //     SetWindowPos(g_hButton, NULL,
+        //         (int)(width * 0.75f), (int)(height * 0.5f), (int)(width * 0.1f), (int)(height * 0.1f),
+        //         SWP_NOZORDER | SWP_NOACTIVATE
+        //     );
+        //     break;
+        // }
+
+        case WM_COMMAND:
+        {
+            int controlId = LOWORD(wParam);
+            int notification = HIWORD(wParam);
+
+            if (controlId == ID_BTN_APPLY && notification == BN_CLICKED) {
+                wchar_t buffer[32];
+                GetWindowText(g_hEditKeyboardX, buffer, sizeof(buffer) / sizeof(wchar_t));
+                g_keyboardX = _wtoi(buffer);
+
+                GetWindowText(g_hEditKeyboardY, buffer, sizeof(buffer) / sizeof(wchar_t));
+                g_keyboardY = _wtoi(buffer);
+
+                InvalidateRect(hwnd, NULL, TRUE);
+            }
+            break;
+        }
 
         default:
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
+            break;
     }
 }
 
@@ -483,6 +635,14 @@ void RenderFrame(void) {
     GetClientRect(g_hwnd, &clientRect);
     int width = clientRect.right - clientRect.left;
     int height = clientRect.bottom - clientRect.top;
+
+    g_keyboardX = (int)(width * 0.25f);
+    g_keyboardY = (int)(height * 0.85f);
+
+    g_mouthWidth = (int)(width * 0.33f);
+    g_mouthHeight = (int)(height * 0.15f);
+
+    XFORM identity = {1, 0, 0, 1, 0, 0};
 
     HDC hdc = GetDC(g_hwnd);
     if (!hdc) return;
@@ -502,13 +662,10 @@ void RenderFrame(void) {
     FillRect(hMemDC, &clientRect, hBrush);
     DeleteObject(hBrush);
     
-#define mouthWidth 100
-#define mouthHeight clientRect.bottom / 10
-
     RECT bottomMouth = {
-        (middleX  - mouthWidth), 
+        (middleX  - g_mouthWidth), 
         (middleY),
-        (middleX  + mouthWidth),
+        (middleX  + g_mouthWidth),
         (clientRect.bottom)
     };
     HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
@@ -518,30 +675,6 @@ void RenderFrame(void) {
     float mouthLevel = GetAudioLevel();
     float audioY = mouthLevel > 0.005f ? (mouthLevel - 0.005f) * 1000.f : 0.0f;
 
-    RECT topMouth = {
-        middleX - mouthWidth,
-        middleY - audioY - mouthHeight,
-        middleX + mouthWidth,
-        middleY - audioY
-    };
-    FillRect(hMemDC, &topMouth, whiteBrush);
-
-    SelectObject(hMemDC, whiteBrush);
-#define eyeSize mouthHeight / 4
-    // Left eye
-    Ellipse(hMemDC,
-        middleX - mouthWidth / 2 - eyeSize,
-        middleY - mouthHeight / 2 - eyeSize - audioY,
-        middleX - mouthWidth / 2 + eyeSize,
-        middleY - mouthHeight / 2 + eyeSize - audioY
-    );
-    // Right eye
-    Ellipse(hMemDC,
-        middleX + mouthWidth / 2 - eyeSize,
-        middleY - mouthHeight / 2 - eyeSize - audioY,
-        middleX + mouthWidth / 2 + eyeSize,
-        middleY - mouthHeight / 2 + eyeSize - audioY
-    );
 
     float audioLevel = GetAudioLevel();
     if (audioLevel > 0.0f) {
@@ -559,72 +692,105 @@ void RenderFrame(void) {
     SetTextColor(hMemDC, RGB(0, 0, 0));
     SetBkMode(hMemDC, TRANSPARENT);
     TextOutA(hMemDC, 10, 20, buffer, (int)strlen(buffer));
-    
-    // Drawing Left Arm
-    float rad = g_keyPress ? -45.0f * (3.14159f / 180.0f) : 45.0f * (3.14159f / 180.0f);
-    float c = cos(rad);
-    float s = sin(rad);
-
-    float leftX[4] = {-20, -20, 20, 20};
-    float leftY[4] = {0, 10, 10, 0};
-
-    POINT points[4] = {
-        {leftX[0] * c - leftY[0] * s, leftX[0] * s + leftY[0] * c},
-        {leftX[1] * c - leftY[1] * s, leftX[1] * s + leftY[1] * c},
-        {leftX[2] * c - leftY[2] * s, leftX[2] * s + leftY[2] * c},
-        {leftX[3] * c - leftY[3] * s, leftX[3] * s + leftY[3] * c},
-    };
-
-    SaveDC(hMemDC);
-
-    XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX - mouthWidth, (FLOAT)middleY};
-    ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
-    
-    if (g_keyPress) {
-        XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, -10, 20};
-        ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
-    }
-
-    SelectObject(hMemDC, blueBrush);
-    Polygon(hMemDC, points, 4);
-    RestoreDC(hMemDC, -1);
-
-    SaveDC(hMemDC);
-
-    rad = g_mousePress ? 45.0f * (3.14159f / 180.0f) : -45.0f * (3.14159f / 180.0f);
-    c = cos(rad);
-    s = sin(rad);
-
-    float rightX[4] = {-20, -20, 20, 20};
-    float rightY[4] = {0, 10, 10, 0};
-
-    POINT rightPoints[4] = {
-        {rightX[0] * c - rightY[0] * s, rightX[0] * s + rightY[0] * c},
-        {rightX[1] * c - rightY[1] * s, rightX[1] * s + rightY[1] * c},
-        {rightX[2] * c - rightY[2] * s, rightX[2] * s + rightY[2] * c},
-        {rightX[3] * c - rightY[3] * s, rightX[3] * s + rightY[3] * c},
-    };
-
-    XFORM rightTranslate = {1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)middleX + mouthWidth, (FLOAT)middleY};
-    ModifyWorldTransform(hMemDC, &rightTranslate, MWT_LEFTMULTIPLY);
-
-    if (g_mousePress) {
-        XFORM translate = {1.0f, 0.0f, 0.0f, 1.0f, 10, 20};
-        ModifyWorldTransform(hMemDC, &translate, MWT_LEFTMULTIPLY);
-    }
-
-    SelectObject(hMemDC, blueBrush);
-    Polygon(hMemDC, rightPoints, 4);
-
-    RestoreDC(hMemDC, -1);
 
     if (!g_keyboard) {
         g_keyboard = load_image("keyboard.png");
     }
 
     if (g_keyboard) {
-        draw_image(hMemDC, g_keyboard, 0, 0);
+        // draw_image(hMemDC, g_keyboard, middleX - mouthWidth - (bufferWidth * 0.05), middleY + mouthHeight + (bufferHeight * 0.3), 0.5, -150.0f);
+        draw_image(hMemDC, g_keyboard, g_keyboardX, g_keyboardY, 0.5, -150.0f);
     }
+
+    SetWorldTransform(hMemDC, &identity);
+    SaveDC(hMemDC);
+    
+    // Drawing Left Arm
+    float armWidth = middleX * 0.2f;
+    float armHeight = middleY * 0.2f;
+    float rad = g_keyPress ? -45.0f * (3.14159f / 180.0f) : 45.0f * (3.14159f / 180.0f);
+    float c = cos(rad);
+    float s = sin(rad);
+
+    POINT leftArmLocal[4] = {
+        { (LONG)(-armWidth), 0 },
+        { (LONG)(-armWidth), (LONG)(armHeight) },
+        { (LONG)( armWidth), (LONG)(armHeight) },
+        { (LONG)( armWidth), 0 },
+    };
+
+    int leftArmXPos = g_keyPress ? (FLOAT)middleX - g_mouthWidth - (0.5f * armWidth) : (FLOAT)middleX - g_mouthWidth - (0.5f * armWidth);
+    int leftArmYPos = g_keyPress ? (FLOAT)middleY : (FLOAT)middleY;
+
+    XFORM xform = {
+        c, s,
+        -s, c, 
+        leftArmXPos, leftArmYPos
+    };
+
+    SetWorldTransform(hMemDC, &xform);
+
+    SelectObject(hMemDC, blueBrush);
+    Polygon(hMemDC, leftArmLocal, 4);
+
+    RestoreDC(hMemDC, -1);
+
+    SetWorldTransform(hMemDC, &identity);
+    SaveDC(hMemDC);
+
+    rad = g_mousePress ? 45.0f * (3.14159f / 180.0f) : -45.0f * (3.14159f / 180.0f);
+    c = cos(rad);
+    s = sin(rad);
+
+    POINT rightArmLocal[4] = {
+        { (LONG)(-armWidth), 0 },
+        { (LONG)(-armWidth), (LONG)(armHeight) },
+        { (LONG)( armWidth), (LONG)(armHeight) },
+        { (LONG)( armWidth), 0 },
+    };
+
+    int rightArmXPos = g_mousePress ? (FLOAT)middleX + g_mouthWidth + (0.5f * armWidth) : (FLOAT)middleX + g_mouthWidth + (0.5f * armWidth);
+    int rightArmYPos = g_mousePress ? (FLOAT)middleY : (FLOAT)middleY;
+
+    XFORM rXform = {
+        c, s, 
+        -s, c, 
+        rightArmXPos, rightArmYPos
+    };
+    SetWorldTransform(hMemDC, &rXform);
+
+    SelectObject(hMemDC, blueBrush);
+    Polygon(hMemDC, rightArmLocal, 4);
+
+    RestoreDC(hMemDC, -1);
+
+    SetWorldTransform(hMemDC, &identity);
+
+    RECT topMouth = {
+        middleX - g_mouthWidth,
+        middleY - audioY - g_mouthHeight,
+        middleX + g_mouthWidth,
+        middleY - audioY
+    };
+    FillRect(hMemDC, &topMouth, whiteBrush);
+
+    SelectObject(hMemDC, whiteBrush);
+
+    int eyeSize = (int)(g_mouthHeight * 0.25f);
+    // Left eye
+    Ellipse(hMemDC,
+        middleX - g_mouthWidth / 2 - eyeSize,
+        middleY - g_mouthHeight / 2 - eyeSize - audioY,
+        middleX - g_mouthWidth / 2 + eyeSize,
+        middleY - g_mouthHeight / 2 + eyeSize - audioY
+    );
+    // Right eye
+    Ellipse(hMemDC,
+        middleX + g_mouthWidth / 2 - eyeSize,
+        middleY - g_mouthHeight / 2 - eyeSize - audioY,
+        middleX + g_mouthWidth / 2 + eyeSize,
+        middleY - g_mouthHeight / 2 + eyeSize - audioY
+    );
 
     DeleteObject(whiteBrush);
     DeleteObject(blueBrush);
