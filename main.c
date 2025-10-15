@@ -18,8 +18,8 @@
 #define centerX WINDOW_WIDTH / 2
 #define centerY WINDOW_HEIGHT / 2
 
-#define log_info(format, ...) printf("[INFO] - " format "\n", ##__VA_ARGS__)
-#define log_error(format, ...) printf("[ERROR] - " format "\n", ##__VA_ARGS__)
+#define log_info(format, ...) printf("[INFO] - " format, ##__VA_ARGS__)
+#define log_error(format, ...) printf("[ERROR] - " format, ##__VA_ARGS__)
 
 static HWND g_hwnd = NULL;
 static bool g_running = true;
@@ -107,7 +107,7 @@ int pngtubeerInit() {
 
     hr = CoInitialize(NULL);
     if (FAILED(hr)) {
-        printf("Failed to initialise COM\n");
+        log_error("Failed to initialise COM\n");
         return 1;
     }
 
@@ -120,7 +120,7 @@ int pngtubeerInit() {
     );
 
     if(FAILED(hr)) {
-        printf("Failed to create device enumerator\n");
+        log_error("Failed to create device enumerator\n");
         CleanupAudio();
     }
 
@@ -132,7 +132,7 @@ int pngtubeerInit() {
     );
 
     if(FAILED(hr)) {
-        printf("Failed to get capture device\n");
+        log_error("Failed to get capture device\n");
         CleanupAudio();
     }
 
@@ -145,27 +145,27 @@ int pngtubeerInit() {
     );
 
     if(FAILED(hr)) {
-        printf("Failed to activate capture client\n");
+        log_error("Failed to activate capture client\n");
         CleanupAudio();
     }
     
     hr = pCaptureClient->lpVtbl->GetMixFormat(pCaptureClient, &pCaptureFormat);
     if (FAILED(hr)) {
-        printf("Failed to get capture format\n");
+        log_error("Failed to get capture format\n");
         CleanupAudio();
     }
 
     WAVEFORMATEXTENSIBLE *extFormat = (WAVEFORMATEXTENSIBLE*)pCaptureFormat;
 
-    printf("Valid bits per sample: %d\n", extFormat->Samples.wValidBitsPerSample);
-    printf("Channel Mask: %08X\n", extFormat->dwChannelMask);
-    printf("SubFormat: %08X-%04X-%04X-",
+    log_info("Valid bits per sample: %d\n", extFormat->Samples.wValidBitsPerSample);
+    log_info("Channel Mask: %08X\n", extFormat->dwChannelMask);
+    log_info("SubFormat: %08X-%04X-%04X-",
         extFormat->SubFormat.Data1,
         extFormat->SubFormat.Data2,
         extFormat->SubFormat.Data3
     );
-    printf("%02X%02X-", extFormat->SubFormat.Data4[0], extFormat->SubFormat.Data4[1]);
-    printf("%02X%02X%02X%02X%02X%02X\n",
+    log_info("%02X%02X-", extFormat->SubFormat.Data4[0], extFormat->SubFormat.Data4[1]);
+    log_info("%02X%02X%02X%02X%02X%02X\n",
         extFormat->SubFormat.Data4[2],
         extFormat->SubFormat.Data4[3],
         extFormat->SubFormat.Data4[4],
@@ -174,11 +174,11 @@ int pngtubeerInit() {
         extFormat->SubFormat.Data4[7]
     );
 
-    printf("Capture Format: \n");
-    printf("    Sample Rate: %lu Hz\n", pCaptureFormat->nSamplesPerSec);
-    printf("    Channels: %u\n", pCaptureFormat->nChannels);
-    printf("    Bits per sample: %u\n", pCaptureFormat->wBitsPerSample);
-    printf("    Format tag: %u\n", pCaptureFormat->wFormatTag);
+    log_info("Capture Format: \n");
+    log_info("    Sample Rate: %lu Hz\n", pCaptureFormat->nSamplesPerSec);
+    log_info("    Channels: %u\n", pCaptureFormat->nChannels);
+    log_info("    Bits per sample: %u\n", pCaptureFormat->wBitsPerSample);
+    log_info("    Format tag: %u\n", pCaptureFormat->wFormatTag);
 
     REFERENCE_TIME hnsRequestedDuration = 100000;
     hr = pCaptureClient->lpVtbl->Initialize(
@@ -191,18 +191,18 @@ int pngtubeerInit() {
         NULL
     );
     if (FAILED(hr)) {
-        printf("Failed to initialise capture client (HRESULT: 0x%lx)\n", hr);
+        log_error("Failed to initialise capture client (HRESULT: 0x%lx)\n", hr);
         CleanupAudio();
     }
 
     UINT32 captureBufferFrameCount;
     hr = pCaptureClient->lpVtbl->GetBufferSize(pCaptureClient, &captureBufferFrameCount);
     if (FAILED(hr)) {
-        printf("Failed to get capture buffer size\n");
+        log_error("Failed to get capture buffer size\n");
         CleanupAudio();
     }
 
-    printf("Capture buffer size: %u frames\n", captureBufferFrameCount);
+    log_info("Capture buffer size: %u frames\n", captureBufferFrameCount);
 
     hr = pCaptureClient->lpVtbl->GetService(
         pCaptureClient,
@@ -210,13 +210,13 @@ int pngtubeerInit() {
         (void**)&pCaptureClientService
     );
     if (FAILED(hr)) {
-        printf("Failed to get capture service\n");
+        log_error("Failed to get capture service\n");
         CleanupAudio();
     }
 
     hr = pCaptureClient->lpVtbl->Start(pCaptureClient);
     if (FAILED(hr)) {
-        printf("Failed to start capture\n");
+        log_error("Failed to start capture\n");
         CleanupAudio();
     }
 
@@ -639,7 +639,7 @@ void RenderFrame(void) {
     g_keyboardX = (int)(width * 0.25f);
     g_keyboardY = (int)(height * 0.85f);
 
-    g_mouthWidth = (int)(width * 0.33f);
+    g_mouthWidth = (int)(width * 0.27f);
     g_mouthHeight = (int)(height * 0.15f);
 
     XFORM identity = {1, 0, 0, 1, 0, 0};
@@ -706,25 +706,28 @@ void RenderFrame(void) {
     SaveDC(hMemDC);
     
     // Drawing Left Arm
-    float armWidth = middleX * 0.2f;
-    float armHeight = middleY * 0.2f;
-    float rad = g_keyPress ? -45.0f * (3.14159f / 180.0f) : 45.0f * (3.14159f / 180.0f);
+    float armWidth = middleX * 0.4f;
+    float armHeight = middleY * 0.1f;
+    float rad = g_keyPress ? 135.0f * (3.14159f / 180.0f) : -135.0f * (3.14159f / 180.0f);
+    // float rad = g_keyPress ? -0.0f * (3.14159f / 180.0f) : 0.0f * (3.14159f / 180.0f);
     float c = cos(rad);
     float s = sin(rad);
 
     POINT leftArmLocal[4] = {
-        { (LONG)(-armWidth), 0 },
-        { (LONG)(-armWidth), (LONG)(armHeight) },
-        { (LONG)( armWidth), (LONG)(armHeight) },
-        { (LONG)( armWidth), 0 },
+        { (LONG)(-armWidth * 0.15f), (LONG)(-armHeight) },
+        { (LONG)(-armWidth * 0.15f), (LONG)( armHeight) },
+        { (LONG)( armWidth * 0.85f), (LONG)( armHeight) },
+        { (LONG)( armWidth * 0.85f), (LONG)(-armHeight) },
     };
 
-    int leftArmXPos = g_keyPress ? (FLOAT)middleX - g_mouthWidth - (0.5f * armWidth) : (FLOAT)middleX - g_mouthWidth - (0.5f * armWidth);
-    int leftArmYPos = g_keyPress ? (FLOAT)middleY : (FLOAT)middleY;
+    int leftArmXPos = (FLOAT)middleX - g_mouthWidth * 0.9f;
+    int leftArmYPos = (FLOAT)middleY;
 
     XFORM xform = {
         c, s,
         -s, c, 
+        // 1,0,0,1,
+        // middleX, middleY
         leftArmXPos, leftArmYPos
     };
 
@@ -743,14 +746,14 @@ void RenderFrame(void) {
     s = sin(rad);
 
     POINT rightArmLocal[4] = {
-        { (LONG)(-armWidth), 0 },
-        { (LONG)(-armWidth), (LONG)(armHeight) },
-        { (LONG)( armWidth), (LONG)(armHeight) },
-        { (LONG)( armWidth), 0 },
+        { (LONG)(-armWidth * 0.15f), (LONG)(-armHeight) },
+        { (LONG)(-armWidth * 0.15f), (LONG)( armHeight) },
+        { (LONG)( armWidth * 0.85f), (LONG)( armHeight) },
+        { (LONG)( armWidth * 0.85f), (LONG)(-armHeight) },
     };
 
-    int rightArmXPos = g_mousePress ? (FLOAT)middleX + g_mouthWidth + (0.5f * armWidth) : (FLOAT)middleX + g_mouthWidth + (0.5f * armWidth);
-    int rightArmYPos = g_mousePress ? (FLOAT)middleY : (FLOAT)middleY;
+    int rightArmXPos = (FLOAT)middleX + g_mouthWidth * 0.9f;
+    int rightArmYPos = (FLOAT)middleY;
 
     XFORM rXform = {
         c, s, 
