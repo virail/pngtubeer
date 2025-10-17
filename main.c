@@ -13,6 +13,11 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+
+ULONG_PTR gdiPlusToken;
+
 #define WINDOW_WIDTH 1920 * 0.25
 #define WINDOW_HEIGHT 1080 * 0.25
 #define centerX WINDOW_WIDTH / 2
@@ -50,12 +55,13 @@ static bool g_mousePress = false;
 UINT_PTR g_timerId = 0;
 
 typedef struct {
-    HBITMAP hBitmap;
+    GpBitmap* bitmap;
     int width;
     int height;
 } Image;
 
 Image* g_keyboard = NULL;
+Image* g_mouse = NULL;
 
 static HBITMAP hBackBuffer = NULL;
 static int bufferWidth = 0, bufferHeight = 0;
@@ -70,10 +76,27 @@ enum {
 int g_keyboardX = 0;
 int g_keyboardY = 0;
 
+int g_mouseX = 0;
+int g_mouseY = 0;
+
 int g_mouthWidth = 100;
 int g_mouthHeight = 100;
 
 HWND g_hEditKeyboardX, g_hEditKeyboardY, g_hButton;
+
+void init_gdiplus() {
+    GdiplusStartupInput input;
+    input.GdiplusVersion = 1;
+    input.DebugEventCallback = NULL;
+    input.SuppressBackgroundThread = FALSE;
+    input.SuppressExternalCodecs = FALSE;
+
+    GdiplusStartup(&gdiPlusToken, &input, NULL);
+}
+
+void shutdown_gdiplus() {
+    GdiplusShutdown(gdiPlusToken);
+}
 
 void ensure_back_buffer(HDC hdc, int width, int height) {
     if (hBackBuffer == NULL || bufferWidth != width || bufferHeight != height) {
@@ -296,50 +319,44 @@ Image* load_image(const char* filename) {
     unsigned char* data = stbi_load(filename, &width, &height, &channels, 4);
     if (!data) return NULL;
 
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    GpBitmap* bitmap;
+    GdipCreateBitmapFromScan0(width, height, width * 4, PixelFormat32bppARGB, NULL, &bitmap);
 
-    HDC hdcScreen = GetDC(NULL);
-    void* bits;
-    HBITMAP hBitmap = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    ReleaseDC(NULL, hdcScreen);
+    BitmapData bmpData;
+    Rect rect;
+    rect.X = 0;
+    rect.Y = 0;
+    rect.Width = width;
+    rect.Height = height;
 
-    if (!hBitmap) {
-        stbi_image_free(data);
-        return NULL;
+    GdipBitmapLockBits(bitmap, &rect, ImageLockModeWrite, PixelFormat32bppARGB, &bmpData);
+
+    unsigned char* dest = (unsigned char*)bmpData.Scan0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int srcIdx = (y * width + x) * 4;
+            int dstIdx = (y * bmpData.Stride) + x * 4;
+
+            dest[dstIdx] = data[srcIdx + 2];
+            dest[dstIdx + 1] = data[srcIdx + 1];
+            dest[dstIdx + 2] = data[srcIdx];
+            dest[dstIdx + 3] = data[srcIdx + 3];
+        }
     }
 
-    unsigned char* dest = (unsigned char*)bits;
-    // for (int i = 0; i < width * height * 4; i += 4) {
-    //     dest[i] = data[i + 2];      // B
-    //     dest[i + 1] = data[i + 1];  // G
-    //     dest[i + 2] = data[i];      // R
-    //     dest[i + 3] = data[i + 3];  // A
-    // }
-    for (int i = 0; i < width * height * 4; i += 4) {
-        float alpha = data[i + 3] / 255.0f;
-        dest[i] = (unsigned char)(data[i + 2] * alpha);     // B
-        dest[i + 1] = (unsigned char)(data[i + 1] * alpha); // G
-        dest[i + 2] = (unsigned char)(data[i] * alpha);     // R
-        dest[i + 3] = alpha;                                // A
-    }
+    GdipBitmapUnlockBits(bitmap, &bmpData);
+    stbi_image_free(data);
 
     Image* image = (Image*)malloc(sizeof(Image));
-    image->hBitmap = hBitmap;
+    image->bitmap = bitmap;
     image->width = width;
     image->height = height;
 
-    stbi_image_free(data);
     return image;
 
 }
 
-void draw_image(HDC hdc, Image* image, int x, int y, float scale, float angle) {
+void draw_image(HDC hdc, Image* image, int x, int y, float scale, float angle, float flip) {
     if (!image) return;
 
     // we are wanting to make the image a percentage of the width
@@ -354,49 +371,90 @@ void draw_image(HDC hdc, Image* image, int x, int y, float scale, float angle) {
     int scaledW = (int)bufferWidth * scale;
     float ratio = (float)scaledW / image->width;
     int scaledH = (int)(image->height * ratio);
-    float angleRad = angle * 3.14159 / 180.0f;
 
-    HDC hMemDC = CreateCompatibleDC(hdc);
-    HDC hScaledDC = CreateCompatibleDC(hdc);
-    HBITMAP hScaled = CreateCompatibleBitmap(hdc, scaledW, scaledH);
+    GpGraphics* graphics;
+    GdipCreateFromHDC(hdc, &graphics);
 
-    HBITMAP hOldScaled = (HBITMAP)SelectObject(hScaledDC, hScaled);
-    HBITMAP hOld = (HBITMAP)SelectObject(hMemDC, image->hBitmap);
+    GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+    GdipSetPixelOffsetMode(graphics, PixelOffsetModeHighQuality);
+    GdipSetCompositingMode(graphics, CompositingModeSourceOver);
+    GdipSetCompositingQuality(graphics, CompositingQualityHighQuality);
 
-    SetStretchBltMode(hScaledDC, HALFTONE);
-    SetBrushOrgEx(hScaledDC, 0, 0, NULL);
-    StretchBlt(hScaledDC, 0, 0, scaledW, scaledH,
-            hMemDC, 0, 0, image->width, image->height, SRCCOPY);
+    GraphicsState state;
+    GdipSaveGraphics(graphics, &state);
 
-    float cosA = cosf(angleRad);
-    float sinA = sinf(angleRad);
+    GdipTranslateWorldTransform(graphics, (REAL)x, (REAL)y, MatrixOrderPrepend);
+    GdipRotateWorldTransform(graphics, angle, MatrixOrderPrepend);
+    GdipScaleWorldTransform(graphics, flip, 1.0f, MatrixOrderPrepend);
 
-    float halfW = scaledW * 0.5f;
-    float halfH = scaledH * 0.5f;
+    GdipDrawImageRect(graphics, (GpImage*)image->bitmap,
+        (REAL)(-scaledW / 2), (REAL)(-scaledH / 2),
+        (REAL)scaledW, (REAL)scaledH
+    );
 
-    POINT pts[3];
-    pts[0].x = x + (int)(-halfW * cosA + halfH * sinA);
-    pts[0].y = y + (int)(-halfW * sinA - halfH * cosA);
-    pts[1].x = x + (int)(halfW * cosA + halfH * sinA);
-    pts[1].y = y + (int)(halfW * sinA - halfH * cosA);
-    pts[2].x = x + (int)(-halfW * cosA - halfH * sinA);
-    pts[2].y = y + (int)(-halfW * sinA + halfH * cosA);
+    GdipRestoreGraphics(graphics, state);
 
-    PlgBlt(hdc, pts, hScaledDC, 0, 0, scaledW, scaledH, NULL, 0, 0);
-
-    // BitBlt(hdc, 0, 0, image->width, image->height, hMemDC, 0, 0, SRCCOPY);
-
-    SelectObject(hScaledDC, hOldScaled);
-    SelectObject(hMemDC, hOld);
-    DeleteObject(hScaled);
-    DeleteDC(hScaledDC);
-    DeleteDC(hMemDC);
+    GdipDeleteGraphics(graphics);
 }
+
+// void draw_image(HDC hdc, Image* image, int x, int y, float scale, float angle) {
+//     if (!image) return;
+//
+//     // we are wanting to make the image a percentage of the width
+//     // means we need the width and then multiply that by the scale we want
+//     // scaledW = bufferWidth * scale;
+//     // image->width * ratio = scaledW
+//     // ratio = scaledW / image->width;
+//     // scaledH = height * radtio;
+//
+//     // will use bufferWidth and height
+//
+//     int scaledW = (int)bufferWidth * scale;
+//     float ratio = (float)scaledW / image->width;
+//     int scaledH = (int)(image->height * ratio);
+//     float angleRad = angle * 3.14159 / 180.0f;
+//
+//     HDC hMemDC = CreateCompatibleDC(hdc);
+//     HDC hScaledDC = CreateCompatibleDC(hdc);
+//     HBITMAP hScaled = CreateCompatibleBitmap(hdc, scaledW, scaledH);
+//
+//     HBITMAP hOldScaled = (HBITMAP)SelectObject(hScaledDC, hScaled);
+//     HBITMAP hOld = (HBITMAP)SelectObject(hMemDC, image->hBitmap);
+//
+//     SetStretchBltMode(hScaledDC, HALFTONE);
+//     SetBrushOrgEx(hScaledDC, 0, 0, NULL);
+//     StretchBlt(hScaledDC, 0, 0, scaledW, scaledH,
+//             hMemDC, 0, 0, image->width, image->height, SRCCOPY);
+//
+//     float cosA = cosf(angleRad);
+//     float sinA = sinf(angleRad);
+//
+//     float halfW = scaledW * 0.5f;
+//     float halfH = scaledH * 0.5f;
+//
+//     POINT pts[3];
+//     pts[0].x = x + (int)(-halfW * cosA + halfH * sinA);
+//     pts[0].y = y + (int)(-halfW * sinA - halfH * cosA);
+//     pts[1].x = x + (int)(halfW * cosA + halfH * sinA);
+//     pts[1].y = y + (int)(halfW * sinA - halfH * cosA);
+//     pts[2].x = x + (int)(-halfW * cosA - halfH * sinA);
+//     pts[2].y = y + (int)(-halfW * sinA + halfH * cosA);
+//
+//     PlgBlt(hdc, pts, hScaledDC, 0, 0, scaledW, scaledH, NULL, 0, 0);
+//
+//     // BitBlt(hdc, 0, 0, image->width, image->height, hMemDC, 0, 0, SRCCOPY);
+//
+//     SelectObject(hScaledDC, hOldScaled);
+//     SelectObject(hMemDC, hOld);
+//     DeleteObject(hScaled);
+//     DeleteDC(hScaledDC);
+//     DeleteDC(hMemDC);
+// }
 
 void free_image(Image* image) {
     if (image) {
-        if (image->hBitmap) {
-            DeleteObject(image->hBitmap);
+        if (image->bitmap) {
+            GdipDisposeImage((GpImage*)image->bitmap);
         }
         free(image);
     }
@@ -427,7 +485,7 @@ void loop(void) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    int result = 1;
+    init_gdiplus();
     pngtubeerInit();
 
     WNDCLASS wc = {0};
@@ -469,6 +527,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     loop();
 
     Cleanup();
+    shutdown_gdiplus();
     return 0;
 
 }
@@ -606,23 +665,23 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         //     break;
         // }
 
-        case WM_COMMAND:
-        {
-            int controlId = LOWORD(wParam);
-            int notification = HIWORD(wParam);
-
-            if (controlId == ID_BTN_APPLY && notification == BN_CLICKED) {
-                wchar_t buffer[32];
-                GetWindowText(g_hEditKeyboardX, buffer, sizeof(buffer) / sizeof(wchar_t));
-                g_keyboardX = _wtoi(buffer);
-
-                GetWindowText(g_hEditKeyboardY, buffer, sizeof(buffer) / sizeof(wchar_t));
-                g_keyboardY = _wtoi(buffer);
-
-                InvalidateRect(hwnd, NULL, TRUE);
-            }
-            break;
-        }
+        // case WM_COMMAND:
+        // {
+        //     int controlId = LOWORD(wParam);
+        //     int notification = HIWORD(wParam);
+        //
+        //     if (controlId == ID_BTN_APPLY && notification == BN_CLICKED) {
+        //         wchar_t buffer[32];
+        //         GetWindowText(g_hEditKeyboardX, buffer, sizeof(buffer) / sizeof(wchar_t));
+        //         g_mouseX = _wtoi(buffer);
+        //
+        //         GetWindowText(g_hEditKeyboardY, buffer, sizeof(buffer) / sizeof(wchar_t));
+        //         g_mouseY = _wtoi(buffer);
+        //
+        //         InvalidateRect(hwnd, NULL, TRUE);
+        //     }
+        //     break;
+        // }
 
         default:
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -638,6 +697,9 @@ void RenderFrame(void) {
 
     g_keyboardX = (int)(width * 0.25f);
     g_keyboardY = (int)(height * 0.85f);
+
+    g_mouseX = (int)(width * (400.0f / 464.0f));
+    g_mouseY = (int)(height * (175.0f / 231.0f));
 
     g_mouthWidth = (int)(width * 0.27f);
     g_mouthHeight = (int)(height * 0.15f);
@@ -697,9 +759,27 @@ void RenderFrame(void) {
         g_keyboard = load_image("keyboard.png");
     }
 
+    if (!g_mouse) {
+        g_mouse = load_image("mouse.png");
+    }
+
+    // Draw brown desk
+    POINT desk[4] = {
+        {-middleX, height * 0.75f },
+        {-middleX, height },
+        { width, height },
+        { width, height * 0.75f },
+    };
+    HBRUSH brownBrush = CreateSolidBrush(RGB(135,68,0));
+    SelectObject(hMemDC, brownBrush);
+    Polygon(hMemDC, desk, 4);
+
     if (g_keyboard) {
         // draw_image(hMemDC, g_keyboard, middleX - mouthWidth - (bufferWidth * 0.05), middleY + mouthHeight + (bufferHeight * 0.3), 0.5, -150.0f);
-        draw_image(hMemDC, g_keyboard, g_keyboardX, g_keyboardY, 0.5, -150.0f);
+        draw_image(hMemDC, g_keyboard, g_keyboardX, g_keyboardY, 0.5, -150.0f, 1.0f);
+    }
+    if (g_mouse) {
+        draw_image(hMemDC, g_mouse, g_mouseX, g_mouseY, 0.2, 140, -1.0f);
     }
 
     SetWorldTransform(hMemDC, &identity);

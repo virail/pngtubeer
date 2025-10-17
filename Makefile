@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
 INCLUDES = 
-LIBS = -lole32 -lgdi32 -lwinmm
+LIBS = -lole32 -lgdi32 -lwinmm -lgdiplus
 
 SRC = main.c
 OBJ = $(SRC:.c=.o)
